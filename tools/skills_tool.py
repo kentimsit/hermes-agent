@@ -355,10 +355,7 @@ def _remaining_required_environment_names(
     capture_result: Dict[str, Any],
     *,
     env_snapshot: Dict[str, str] | None = None,
-    backend: str | None = None,
 ) -> List[str]:
-    if backend is None:
-        backend = _get_terminal_backend_name()
     missing_names = set(capture_result["missing_names"])
 
     if env_snapshot is None:
@@ -1086,7 +1083,6 @@ def skill_view(name: str, file_path: str = None, task_id: str = None) -> str:
             required_env_vars,
             capture_result,
             env_snapshot=env_snapshot,
-            backend=backend,
         )
         setup_needed = bool(remaining_missing_required_envs)
 
