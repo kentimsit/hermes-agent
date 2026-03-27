@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
+from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
+
 
 # ---------------------------------------------------------------------------
 # Helpers to build mock Daytona SDK objects
@@ -54,6 +56,13 @@ def _patch_daytona_imports(monkeypatch):
 def daytona_sdk(monkeypatch):
     """Provide a mock daytona SDK module and return it for assertions."""
     return _patch_daytona_imports(monkeypatch)
+
+
+@pytest.fixture(autouse=True)
+def _clean_passthrough():
+    clear_env_passthrough()
+    yield
+    clear_env_passthrough()
 
 
 @pytest.fixture()
@@ -245,6 +254,26 @@ class TestExecute:
         assert cmd.startswith("timeout 42 sh -c ")
         # SDK timeout param should NOT be passed
         assert "timeout" not in call_args[1]
+
+    def test_passthrough_envs_are_exported(self, make_env, monkeypatch):
+        sb = _make_sandbox()
+        sb.process.exec.side_effect = [
+            _make_exec_response(result="/root"),
+            _make_exec_response(result="ok", exit_code=0),
+        ]
+        sb.state = "started"
+        env = make_env(sandbox=sb)
+
+        register_env_passthrough(["TENOR_API_KEY"])
+        monkeypatch.setenv("TENOR_API_KEY", "value with spaces")
+
+        env.execute("echo hello")
+
+        call_args = sb.process.exec.call_args_list[-1]
+        cmd = call_args[0][0]
+        assert "export TENOR_API_KEY" in cmd
+        assert "value with spaces" in cmd
+        assert "echo hello" in cmd
 
     def test_timeout_returns_exit_code_124(self, make_env):
         """Shell timeout utility returns exit code 124."""

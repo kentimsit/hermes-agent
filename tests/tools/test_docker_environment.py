@@ -7,6 +7,7 @@ import types
 import pytest
 
 from tools.environments import docker as docker_env
+from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
 
 
 def _mock_subprocess_run(monkeypatch):
@@ -246,6 +247,13 @@ def _make_execute_only_env(forward_env=None):
     return env
 
 
+@pytest.fixture(autouse=True)
+def _clean_passthrough():
+    clear_env_passthrough()
+    yield
+    clear_env_passthrough()
+
+
 def test_execute_uses_hermes_dotenv_for_allowlisted_env(monkeypatch):
     env = _make_execute_only_env(["GITHUB_TOKEN"])
     popen_calls = []
@@ -255,7 +263,10 @@ def test_execute_uses_hermes_dotenv_for_allowlisted_env(monkeypatch):
         return _FakePopen(cmd, **kwargs)
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {"GITHUB_TOKEN": "value_from_dotenv"})
+    monkeypatch.setattr(
+        "hermes_cli.config.load_env",
+        lambda: {"GITHUB_TOKEN": "value_from_dotenv"},
+    )
     monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
 
     result = env.execute("echo hi")
@@ -280,3 +291,41 @@ def test_execute_prefers_shell_env_over_hermes_dotenv(monkeypatch):
 
     assert "GITHUB_TOKEN=value_from_shell" in popen_calls[0]
     assert "GITHUB_TOKEN=value_from_dotenv" not in popen_calls[0]
+
+
+def test_execute_includes_skill_passthrough_env(monkeypatch):
+    env = _make_execute_only_env()
+    popen_calls = []
+
+    def _fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return _FakePopen(cmd, **kwargs)
+
+    register_env_passthrough(["TENOR_API_KEY"])
+    monkeypatch.setenv("TENOR_API_KEY", "skill-value")
+    monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
+
+    env.execute("echo hi")
+
+    assert "TENOR_API_KEY=skill-value" in popen_calls[0]
+
+
+def test_execute_uses_dotenv_for_skill_passthrough_env(monkeypatch):
+    env = _make_execute_only_env()
+    popen_calls = []
+
+    def _fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        return _FakePopen(cmd, **kwargs)
+
+    register_env_passthrough(["TENOR_API_KEY"])
+    monkeypatch.delenv("TENOR_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_env",
+        lambda: {"TENOR_API_KEY": "value_from_dotenv"},
+    )
+    monkeypatch.setattr(docker_env.subprocess, "Popen", _fake_popen)
+
+    env.execute("echo hi")
+
+    assert "TENOR_API_KEY=value_from_dotenv" in popen_calls[0]

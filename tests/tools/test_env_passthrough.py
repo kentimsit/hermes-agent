@@ -106,6 +106,39 @@ class TestConfigPassthrough:
         assert "SKILL_KEY" in all_pt
 
 
+class TestRemoteBackendHelpers:
+    def test_resolve_passthrough_env_vars_prefers_shell_env(self, monkeypatch):
+        from tools.environments.base import _resolve_passthrough_env_vars
+
+        register_env_passthrough(["TENOR_API_KEY"])
+        monkeypatch.setenv("TENOR_API_KEY", "value-from-shell")
+        monkeypatch.setattr("hermes_cli.config.load_env", lambda: {"TENOR_API_KEY": "value-from-dotenv"})
+
+        result = _resolve_passthrough_env_vars()
+        assert result == {"TENOR_API_KEY": "value-from-shell"}
+
+    def test_resolve_passthrough_env_vars_falls_back_to_dotenv(self, monkeypatch):
+        from tools.environments.base import _resolve_passthrough_env_vars
+
+        register_env_passthrough(["TENOR_API_KEY"])
+        monkeypatch.delenv("TENOR_API_KEY", raising=False)
+        monkeypatch.setattr("hermes_cli.config.load_env", lambda: {"TENOR_API_KEY": "value-from-dotenv"})
+
+        result = _resolve_passthrough_env_vars()
+        assert result == {"TENOR_API_KEY": "value-from-dotenv"}
+
+    def test_prepend_env_exports_quotes_values(self):
+        from tools.environments.base import _prepend_env_exports
+
+        result = _prepend_env_exports(
+            "echo hello", {"EMPTY": "", "TENOR_API_KEY": "value with spaces"}
+        )
+
+        assert "export EMPTY=''" in result
+        assert "export TENOR_API_KEY='value with spaces'" in result
+        assert result.endswith("; echo hello")
+
+
 class TestExecuteCodeIntegration:
     """Verify that the passthrough is checked in execute_code's env filtering."""
 

@@ -76,6 +76,13 @@ class SSHEnvironment(PersistentShellMixin, BaseEnvironment):
         cmd.append(f"{self.user}@{self.host}")
         return cmd
 
+    def _prepare_command(self, command: str) -> tuple[str, str | None]:
+        exec_command, sudo_stdin = super()._prepare_command(command)
+        exec_command = self._prepend_env_exports(
+            exec_command, self._resolve_passthrough_env()
+        )
+        return exec_command, sudo_stdin
+
     def _establish_connection(self):
         cmd = self._build_ssh_command()
         cmd.append("echo 'SSH connection established'")

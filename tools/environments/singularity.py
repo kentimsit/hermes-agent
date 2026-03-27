@@ -281,6 +281,9 @@ class SingularityEnvironment(BaseEnvironment):
         effective_timeout = timeout or self.timeout
         work_dir = cwd or self.cwd
         exec_command, sudo_stdin = self._prepare_command(command)
+        exec_command = self._prepend_env_exports(
+            exec_command, self._resolve_passthrough_env()
+        )
 
         # Merge sudo password (if any) with caller-supplied stdin_data.
         if sudo_stdin is not None and stdin_data is not None:
