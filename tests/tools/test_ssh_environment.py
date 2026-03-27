@@ -9,6 +9,7 @@ import pytest
 
 from tools.environments.ssh import SSHEnvironment
 from tools.environments import ssh as ssh_env
+from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
 
 _SSH_HOST = os.getenv("TERMINAL_SSH_HOST", "")
 _SSH_USER = os.getenv("TERMINAL_SSH_USER", "")
@@ -21,6 +22,13 @@ requires_ssh = pytest.mark.skipif(
     not _has_ssh,
     reason="TERMINAL_SSH_HOST / TERMINAL_SSH_USER not set",
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_passthrough():
+    clear_env_passthrough()
+    yield
+    clear_env_passthrough()
 
 
 def _run(command, task_id="ssh_test", **kwargs):
@@ -65,6 +73,17 @@ class TestBuildSSHCommand:
     def test_user_host_suffix(self):
         env = SSHEnvironment(host="h", user="u")
         assert env._build_ssh_command()[-1] == "u@h"
+
+    def test_prepare_command_prepends_passthrough_exports(self, monkeypatch):
+        register_env_passthrough(["TENOR_API_KEY"])
+        monkeypatch.setenv("TENOR_API_KEY", "value with spaces")
+
+        env = SSHEnvironment(host="h", user="u")
+        exec_command, sudo_stdin = env._prepare_command("echo hello")
+
+        assert sudo_stdin is None
+        assert "export TENOR_API_KEY='value with spaces'" in exec_command
+        assert exec_command.endswith("; echo hello")
 
 
 class TestTerminalToolConfig:

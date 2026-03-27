@@ -406,13 +406,9 @@ class DockerEnvironment(BaseEnvironment):
         if effective_stdin is not None:
             cmd.append("-i")
         cmd.extend(["-w", work_dir])
-        hermes_env = _load_hermes_env_vars() if self._forward_env else {}
-        for key in self._forward_env:
-            value = os.getenv(key)
-            if value is None:
-                value = hermes_env.get(key)
-            if value is not None:
-                cmd.extend(["-e", f"{key}={value}"])
+        passthrough_env = self._resolve_passthrough_env(self._forward_env)
+        for key, value in sorted(passthrough_env.items()):
+            cmd.extend(["-e", f"{key}={value}"])
         cmd.extend([self._container_id, "bash", "-lc", exec_command])
 
         try:

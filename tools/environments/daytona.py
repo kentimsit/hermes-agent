@@ -212,6 +212,9 @@ class DaytonaEnvironment(BaseEnvironment):
             exec_command = (
                 f"printf '%s\\n' {shlex.quote(sudo_stdin.rstrip())} | {exec_command}"
             )
+        exec_command = self._prepend_env_exports(
+            exec_command, self._resolve_passthrough_env()
+        )
         effective_cwd = cwd or self.cwd or None
         effective_timeout = timeout or self.timeout
 

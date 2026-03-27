@@ -2,10 +2,15 @@
 
 from abc import ABC, abstractmethod
 import os
+import re
+import shlex
 import subprocess
 from pathlib import Path
+from typing import Iterable
 
 from hermes_cli.config import get_hermes_home
+
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def get_sandbox_dir() -> Path:
@@ -21,6 +26,58 @@ def get_sandbox_dir() -> Path:
         p = get_hermes_home() / "sandboxes"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _resolve_passthrough_env_vars(
+    extra_names: Iterable[str] | None = None,
+) -> dict[str, str]:
+    """Resolve active passthrough env vars from the shell or Hermes .env."""
+    try:
+        from tools.env_passthrough import get_all_passthrough
+
+        names = set(get_all_passthrough())
+    except Exception:
+        names = set()
+
+    for item in extra_names or ():
+        if isinstance(item, str):
+            names.add(item)
+
+    if not names:
+        return {}
+
+    try:
+        from hermes_cli.config import load_env
+
+        env_snapshot = load_env() or {}
+    except Exception:
+        env_snapshot = {}
+
+    resolved: dict[str, str] = {}
+    for raw_name in sorted(names):
+        name = raw_name.strip()
+        if not name or not _ENV_VAR_NAME_RE.match(name):
+            continue
+
+        value = os.getenv(name)
+        if value is None:
+            value = env_snapshot.get(name)
+        if value is not None:
+            resolved[name] = value
+
+    return resolved
+
+
+def _prepend_env_exports(command: str, env_vars: dict[str, str]) -> str:
+    """Prefix shell-safe export statements ahead of *command*."""
+    if not env_vars:
+        return command
+
+    exports = "; ".join(
+        f"export {name}={shlex.quote(value)}"
+        for name, value in sorted(env_vars.items())
+    )
+    return f"{exports}; {command}"
 
 
 class BaseEnvironment(ABC):
@@ -73,6 +130,16 @@ class BaseEnvironment(ABC):
         """
         from tools.terminal_tool import _transform_sudo_command
         return _transform_sudo_command(command)
+
+    def _resolve_passthrough_env(
+        self, extra_names: Iterable[str] | None = None
+    ) -> dict[str, str]:
+        """Resolve passthrough env vars visible to this backend."""
+        return _resolve_passthrough_env_vars(extra_names)
+
+    def _prepend_env_exports(self, command: str, env_vars: dict[str, str]) -> str:
+        """Prefix export statements for backends that run through a shell."""
+        return _prepend_env_exports(command, env_vars)
 
     def _build_run_kwargs(self, timeout: int | None,
                           stdin_data: str | None = None) -> dict:
