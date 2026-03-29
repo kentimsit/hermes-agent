@@ -2,10 +2,11 @@
 
 from abc import ABC, abstractmethod
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
-from hermes_cli.config import get_hermes_home
+from hermes_cli.config import get_hermes_home, load_env
 
 
 def get_sandbox_dir() -> Path:
@@ -21,6 +22,37 @@ def get_sandbox_dir() -> Path:
         p = get_hermes_home() / "sandboxes"
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _get_passthrough_exports() -> str:
+    """Build a shell snippet that exports active passthrough env vars.
+
+    Values come from the live process environment first, then fall back to
+    ``HERMES_HOME/.env`` so remote-backed shells can see skill-declared vars
+    even when Hermes intentionally filters them out of child process envs.
+    """
+    try:
+        from tools.env_passthrough import get_all_passthrough
+    except Exception:
+        return ""
+
+    passthrough_names = sorted(get_all_passthrough())
+    if not passthrough_names:
+        return ""
+
+    env_snapshot: dict[str, str] | None = None
+    export_parts: list[str] = []
+    for name in passthrough_names:
+        value = os.getenv(name)
+        if value is None:
+            if env_snapshot is None:
+                env_snapshot = load_env()
+            value = env_snapshot.get(name)
+        if value is None:
+            continue
+        export_parts.append(f"export {name}={shlex.quote(value)}")
+
+    return "; ".join(export_parts)
 
 
 class BaseEnvironment(ABC):
@@ -72,7 +104,26 @@ class BaseEnvironment(ABC):
             daytona) handle sudo_stdin in their own execute() method.
         """
         from tools.terminal_tool import _transform_sudo_command
-        return _transform_sudo_command(command)
+        transformed_command, sudo_stdin = _transform_sudo_command(command)
+        passthrough_exports = _get_passthrough_exports()
+        if not passthrough_exports:
+            return transformed_command, sudo_stdin
+
+        # Wrap in a subshell so exported vars apply to the whole command
+        # without polluting long-lived persistent shells between invocations.
+        #
+        # Multiline commands need the closing parenthesis on its own line so
+        # shell heredoc terminators remain bare terminator lines.
+        if "\n" in transformed_command:
+            wrapped_command = (
+                "(\n"
+                f"{passthrough_exports}\n"
+                f"{transformed_command}\n"
+                ")"
+            )
+        else:
+            wrapped_command = f"({passthrough_exports}; {transformed_command})"
+        return wrapped_command, sudo_stdin
 
     def _build_run_kwargs(self, timeout: int | None,
                           stdin_data: str | None = None) -> dict:

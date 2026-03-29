@@ -1,6 +1,7 @@
 """Tests for tools.env_passthrough — skill and config env var passthrough."""
 
 import os
+import shlex
 import pytest
 import yaml
 
@@ -11,6 +12,22 @@ from tools.env_passthrough import (
     register_env_passthrough,
     reset_config_cache,
 )
+
+
+class _DummyEnvironment:
+    """Small helper that exposes BaseEnvironment command preparation."""
+
+    def __new__(cls):
+        from tools.environments.base import BaseEnvironment
+
+        class _ConcreteDummyEnvironment(BaseEnvironment):
+            def execute(self, command: str, cwd: str = "", *, timeout=None, stdin_data=None):
+                return {}
+
+            def cleanup(self):
+                return None
+
+        return _ConcreteDummyEnvironment(cwd=".", timeout=60)
 
 
 @pytest.fixture(autouse=True)
@@ -197,3 +214,61 @@ class TestTerminalIntegration:
         register_env_passthrough([blocked_var])
         result_after = _make_run_env({})
         assert blocked_var in result_after
+
+
+class TestSharedCommandPreparation:
+    """Verify shared command preparation exports active passthrough vars."""
+
+    def test_prepare_command_exports_passthrough_from_os_environ(self, monkeypatch):
+        value = "value with spaces & symbols"
+        monkeypatch.setenv("TENOR_API_KEY", value)
+        register_env_passthrough(["TENOR_API_KEY"])
+
+        env = _DummyEnvironment()
+        prepared, sudo_stdin = env._prepare_command("echo hello")
+
+        assert sudo_stdin is None
+        assert prepared == (
+            f"(export TENOR_API_KEY={shlex.quote(value)}; echo hello)"
+        )
+
+    def test_prepare_command_uses_persisted_env_when_process_env_missing(
+        self, tmp_path, monkeypatch
+    ):
+        value = "persisted value"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.delenv("TENOR_API_KEY", raising=False)
+        (tmp_path / ".env").write_text(f"TENOR_API_KEY={value}\n")
+        register_env_passthrough(["TENOR_API_KEY"])
+
+        env = _DummyEnvironment()
+        prepared, sudo_stdin = env._prepare_command("echo hello")
+
+        assert sudo_stdin is None
+        assert prepared == (
+            f"(export TENOR_API_KEY={shlex.quote(value)}; echo hello)"
+        )
+
+    def test_prepare_command_keeps_multiline_heredoc_terminator_on_own_line(
+        self, monkeypatch
+    ):
+        value = "value with spaces & symbols"
+        monkeypatch.setenv("TENOR_API_KEY", value)
+        register_env_passthrough(["TENOR_API_KEY"])
+
+        env = _DummyEnvironment()
+        prepared, sudo_stdin = env._prepare_command(
+            "cat > /tmp/example.py << 'HERMES_EOF_abcd1234'\n"
+            "print('hi')\n"
+            "HERMES_EOF_abcd1234"
+        )
+
+        assert sudo_stdin is None
+        assert prepared == (
+            "(\n"
+            f"export TENOR_API_KEY={shlex.quote(value)}\n"
+            "cat > /tmp/example.py << 'HERMES_EOF_abcd1234'\n"
+            "print('hi')\n"
+            "HERMES_EOF_abcd1234\n"
+            ")"
+        )

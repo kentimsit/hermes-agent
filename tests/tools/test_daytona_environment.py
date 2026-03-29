@@ -1,5 +1,6 @@
 """Unit tests for the Daytona cloud sandbox environment backend."""
 
+import re
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -319,6 +320,60 @@ class TestExecute:
         result = env.execute("echo retry")
         assert result["output"] == "ok"
         assert result["returncode"] == 0
+
+    def test_execute_exports_active_passthrough_vars(self, make_env, monkeypatch):
+        from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
+
+        clear_env_passthrough()
+        monkeypatch.setenv("TENOR_API_KEY", "pass-through-123")
+
+        sb = _make_sandbox()
+        sb.process.exec.side_effect = [
+            _make_exec_response(result="/root"),
+            _make_exec_response(result="ok", exit_code=0),
+        ]
+        sb.state = "started"
+        env = make_env(sandbox=sb)
+
+        try:
+            register_env_passthrough(["TENOR_API_KEY"])
+            env.execute("echo hello")
+        finally:
+            clear_env_passthrough()
+
+        call_args = sb.process.exec.call_args_list[-1]
+        cmd = call_args[0][0]
+        assert "TENOR_API_KEY" in cmd
+        assert "pass-through-123" in cmd
+
+    def test_stdin_data_with_passthrough_keeps_heredoc_terminator_separate(
+        self, make_env, monkeypatch
+    ):
+        from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
+
+        clear_env_passthrough()
+        monkeypatch.setenv("TENOR_API_KEY", "pass-through-123")
+
+        sb = _make_sandbox()
+        sb.process.exec.side_effect = [
+            _make_exec_response(result="/root"),
+            _make_exec_response(result="ok", exit_code=0),
+        ]
+        sb.state = "started"
+        env = make_env(sandbox=sb)
+
+        try:
+            register_env_passthrough(["TENOR_API_KEY"])
+            env.execute("cat > /tmp/example.py", stdin_data="print('hi')")
+        finally:
+            clear_env_passthrough()
+
+        call_args = sb.process.exec.call_args_list[-1]
+        cmd = call_args[0][0]
+        assert "TENOR_API_KEY" in cmd
+        assert "HERMES_EOF_" in cmd
+        assert re.search(r"\nHERMES_EOF_[0-9a-f]{8}\n\)", cmd)
+        assert not re.search(r"\nHERMES_EOF_[0-9a-f]{8}\)", cmd)
 
 
 # ---------------------------------------------------------------------------
