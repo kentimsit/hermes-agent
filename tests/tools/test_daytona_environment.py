@@ -1,11 +1,19 @@
 """Unit tests for the Daytona cloud sandbox environment backend."""
 
+import importlib.util
+from pathlib import Path
+from dataclasses import dataclass
 import re
+import sys
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, PropertyMock
+import types
+from unittest.mock import MagicMock, patch, PropertyMock, call
 
 import pytest
+
+
+TOOLS_ROOT = Path(__file__).resolve().parents[2] / "tools"
 
 
 # ---------------------------------------------------------------------------
@@ -21,6 +29,7 @@ def _make_sandbox(sandbox_id="sb-123", state="started"):
     sb.id = sandbox_id
     sb.state = state
     sb.process.exec.return_value = _make_exec_response()
+    sb.fs = MagicMock()
     return sb
 
 
@@ -36,15 +45,75 @@ def _patch_daytona_imports(monkeypatch):
         ARCHIVED = "archived"
         ERROR = "error"
 
+    @dataclass
+    class _FileUpload:
+        source: object
+        destination: str
+
     daytona_mod = _types.ModuleType("daytona")
     daytona_mod.Daytona = MagicMock
     daytona_mod.CreateSandboxFromImageParams = MagicMock
     daytona_mod.DaytonaError = type("DaytonaError", (Exception,), {})
+    daytona_mod.FileUpload = _FileUpload
     daytona_mod.Resources = MagicMock(name="Resources")
     daytona_mod.SandboxState = _SandboxState
 
     monkeypatch.setitem(__import__("sys").modules, "daytona", daytona_mod)
     return daytona_mod
+
+
+def _load_module_from_path(monkeypatch, module_name: str, path: Path):
+    """Load one tools module directly from disk under a controlled import name."""
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None
+    assert spec.loader is not None
+
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _patch_tools_imports(monkeypatch):
+    """Load the Daytona modules without importing the full optional tools package."""
+    tools_pkg = types.ModuleType("tools")
+    tools_pkg.__path__ = [str(TOOLS_ROOT)]
+    environments_pkg = types.ModuleType("tools.environments")
+    environments_pkg.__path__ = [str(TOOLS_ROOT / "environments")]
+
+    terminal_tool_mod = types.ModuleType("tools.terminal_tool")
+    terminal_tool_mod._transform_sudo_command = lambda command: (command, None)
+
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.environments", environments_pkg)
+    monkeypatch.setitem(sys.modules, "tools.terminal_tool", terminal_tool_mod)
+
+    tools_pkg.environments = environments_pkg
+    tools_pkg.terminal_tool = terminal_tool_mod
+
+    env_passthrough_mod = _load_module_from_path(
+        monkeypatch, "tools.env_passthrough", TOOLS_ROOT / "env_passthrough.py"
+    )
+    tools_pkg.env_passthrough = env_passthrough_mod
+
+    interrupt_mod = _load_module_from_path(
+        monkeypatch, "tools.interrupt", TOOLS_ROOT / "interrupt.py"
+    )
+    base_mod = _load_module_from_path(
+        monkeypatch,
+        "tools.environments.base",
+        TOOLS_ROOT / "environments/base.py",
+    )
+    daytona_mod = _load_module_from_path(
+        monkeypatch,
+        "tools.environments.daytona",
+        TOOLS_ROOT / "environments/daytona.py",
+    )
+
+    tools_pkg.interrupt = interrupt_mod
+    environments_pkg.base = base_mod
+    environments_pkg.daytona = daytona_mod
+    return SimpleNamespace(interrupt=interrupt_mod, daytona=daytona_mod)
 
 
 # ---------------------------------------------------------------------------
@@ -58,10 +127,16 @@ def daytona_sdk(monkeypatch):
 
 
 @pytest.fixture()
-def make_env(daytona_sdk, monkeypatch):
+def tools_modules(monkeypatch):
+    """Provide directly loaded Daytona tool modules for isolated tests."""
+    return _patch_tools_imports(monkeypatch)
+
+
+@pytest.fixture()
+def make_env(daytona_sdk, tools_modules, monkeypatch):
     """Factory that creates a DaytonaEnvironment with a mocked SDK."""
     # Prevent is_interrupted from interfering
-    monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+    monkeypatch.setattr(tools_modules.interrupt, "is_interrupted", lambda: False)
     # Prevent skills/credential sync from consuming mock exec calls
     monkeypatch.setattr("tools.credential_files.get_credential_file_mounts", lambda: [])
     monkeypatch.setattr("tools.credential_files.get_skills_directory_mount", lambda **kw: None)
@@ -96,7 +171,7 @@ def make_env(daytona_sdk, monkeypatch):
 
         daytona_sdk.Daytona = MagicMock(return_value=mock_client)
 
-        from tools.environments.daytona import DaytonaEnvironment
+        DaytonaEnvironment = tools_modules.daytona.DaytonaEnvironment
 
         kwargs.setdefault("disk", 10240)
         env = DaytonaEnvironment(
@@ -467,3 +542,52 @@ class TestEnsureSandboxReady:
         env._sandbox.state = "started"
         env._ensure_sandbox_ready()
         env._sandbox.start.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Native filesystem uploads
+# ---------------------------------------------------------------------------
+
+class TestNativeUploads:
+    def test_upload_files_creates_missing_parent_dirs_and_uploads_batch(self, make_env):
+        sb = _make_sandbox()
+        sb.state = "started"
+        sb.process.exec.side_effect = [_make_exec_response(result="/root")]
+        sb.fs.get_file_info.side_effect = [
+            RuntimeError("missing references"),
+            RuntimeError("missing scripts"),
+        ]
+        env = make_env(sandbox=sb)
+
+        env.upload_files(
+            [
+                (b'{"ok": true}', "references/data.json"),
+                (b"print('hello')\n", "scripts/helper.py"),
+            ],
+            timeout=123,
+            folder_mode="700",
+        )
+
+        sb.fs.create_folder.assert_has_calls(
+            [call("references", "700"), call("scripts", "700")],
+            any_order=True,
+        )
+        sb.fs.upload_files.assert_called_once()
+        upload_args = sb.fs.upload_files.call_args.args[0]
+        upload_timeout = sb.fs.upload_files.call_args.kwargs["timeout"]
+
+        assert [(item.source, item.destination) for item in upload_args] == [
+            (b'{"ok": true}', "references/data.json"),
+            (b"print('hello')\n", "scripts/helper.py"),
+        ]
+        assert upload_timeout == 123
+
+    def test_upload_files_rejects_non_directory_parent(self, make_env):
+        sb = _make_sandbox()
+        sb.state = "started"
+        sb.process.exec.side_effect = [_make_exec_response(result="/root")]
+        sb.fs.get_file_info.return_value = SimpleNamespace(is_dir=False)
+        env = make_env(sandbox=sb)
+
+        with pytest.raises(RuntimeError, match="not a directory"):
+            env.upload_files([(b"hello", "scripts/helper.py")])

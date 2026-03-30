@@ -12,6 +12,7 @@ import shlex
 import threading
 import uuid
 import warnings
+from pathlib import PurePosixPath
 from typing import Optional
 
 from tools.environments.base import BaseEnvironment
@@ -281,6 +282,58 @@ class DaytonaEnvironment(BaseEnvironment):
             return {"output": f"Daytona execution error: {err}", "returncode": 1}
 
         return result
+
+    def _ensure_remote_directory(self, path: str, mode: str) -> None:
+        """Create one sandbox directory when it is missing."""
+        normalized_path = str(path or "").strip()
+        if normalized_path in {"", ".", "/"}:
+            return
+
+        try:
+            info = self._sandbox.fs.get_file_info(normalized_path)
+        except Exception:
+            self._sandbox.fs.create_folder(normalized_path, mode)
+            return
+
+        if not getattr(info, "is_dir", False):
+            raise RuntimeError(
+                f"Sandbox path exists and is not a directory: {normalized_path}"
+            )
+
+    def upload_files(
+        self,
+        files: list[tuple[bytes | str, str]],
+        *,
+        timeout: int = 30 * 60,
+        folder_mode: str = "755",
+    ) -> None:
+        """Upload files into the active sandbox through Daytona's filesystem API."""
+        if not files:
+            return
+
+        from daytona import FileUpload
+
+        with self._lock:
+            self._ensure_sandbox_ready()
+
+            parent_directories = sorted(
+                {
+                    str(PurePosixPath(destination).parent)
+                    for _, destination in files
+                    if str(PurePosixPath(destination).parent) not in {"", ".", "/"}
+                },
+                key=lambda path: (len(PurePosixPath(path).parts), path),
+            )
+            for directory in parent_directories:
+                self._ensure_remote_directory(directory, folder_mode)
+
+            self._sandbox.fs.upload_files(
+                [
+                    FileUpload(source=source, destination=destination)
+                    for source, destination in files
+                ],
+                timeout=timeout,
+            )
 
     def cleanup(self):
         with self._lock:
