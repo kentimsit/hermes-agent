@@ -83,13 +83,19 @@ def _patch_tools_imports(monkeypatch):
 
     terminal_tool_mod = types.ModuleType("tools.terminal_tool")
     terminal_tool_mod._transform_sudo_command = lambda command: (command, None)
+    credential_files_mod = types.ModuleType("tools.credential_files")
+    credential_files_mod.get_credential_file_mounts = lambda: []
+    credential_files_mod.get_skills_directory_mount = lambda **kw: None
+    credential_files_mod.iter_skills_files = lambda **kw: []
 
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
     monkeypatch.setitem(sys.modules, "tools.environments", environments_pkg)
     monkeypatch.setitem(sys.modules, "tools.terminal_tool", terminal_tool_mod)
+    monkeypatch.setitem(sys.modules, "tools.credential_files", credential_files_mod)
 
     tools_pkg.environments = environments_pkg
     tools_pkg.terminal_tool = terminal_tool_mod
+    tools_pkg.credential_files = credential_files_mod
 
     env_passthrough_mod = _load_module_from_path(
         monkeypatch, "tools.env_passthrough", TOOLS_ROOT / "env_passthrough.py"
@@ -113,7 +119,11 @@ def _patch_tools_imports(monkeypatch):
     tools_pkg.interrupt = interrupt_mod
     environments_pkg.base = base_mod
     environments_pkg.daytona = daytona_mod
-    return SimpleNamespace(interrupt=interrupt_mod, daytona=daytona_mod)
+    return SimpleNamespace(
+        interrupt=interrupt_mod,
+        credential_files=credential_files_mod,
+        daytona=daytona_mod,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +148,17 @@ def make_env(daytona_sdk, tools_modules, monkeypatch):
     # Prevent is_interrupted from interfering
     monkeypatch.setattr(tools_modules.interrupt, "is_interrupted", lambda: False)
     # Prevent skills/credential sync from consuming mock exec calls
-    monkeypatch.setattr("tools.credential_files.get_credential_file_mounts", lambda: [])
-    monkeypatch.setattr("tools.credential_files.get_skills_directory_mount", lambda **kw: None)
-    monkeypatch.setattr("tools.credential_files.iter_skills_files", lambda **kw: [])
+    monkeypatch.setattr(
+        tools_modules.credential_files, "get_credential_file_mounts", lambda: []
+    )
+    monkeypatch.setattr(
+        tools_modules.credential_files,
+        "get_skills_directory_mount",
+        lambda **kw: None,
+    )
+    monkeypatch.setattr(
+        tools_modules.credential_files, "iter_skills_files", lambda **kw: []
+    )
 
     def _factory(
         sandbox=None,
